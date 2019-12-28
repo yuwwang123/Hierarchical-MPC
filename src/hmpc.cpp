@@ -8,19 +8,25 @@
 
 //const string file_name = "/home/yuwei/rcws/logs/final1030.csv";
 const string file_name = "/home/yuwei/rcws/logs/yuwei_wp.csv";
+const double RRT_INTERVAL = 0.1;
 
-HMPC::HMPC(ros::NodeHandle &nh): nh_(nh), track_(Track(file_name, 0.5)){
+HMPC::HMPC(ros::NodeHandle &nh): nh_(nh), track_(Track(file_name, 0.1)){
 
     getParameters(nh_);
     init_occupancy_grid();
 
     odom_sub_ = nh_.subscribe(pose_topic, 10, &HMPC::odom_callback, this);
     drive_pub_ = nh_.advertise<ackermann_msgs::AckermannDriveStamped>(drive_topic, 1);
+    rrt_sub_ = nh_.subscribe("path_found", 1, &HMPC::rrt_path_callback, this);
+    map_sub_ = nh_.subscribe("map_updated", 1, &HMPC::map_callback, this);
+
 
     track_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("track_centerline", 10);
     trajectories_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("trajectories", 10);
 
     hmpc_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("HMPC", 10);
+    debugger_pub_ = nh_.advertise<visualization_msgs::Marker>("Debugger", 10);
+
     compute_trajectory_table();
 }
 
@@ -41,12 +47,13 @@ void HMPC::getParameters(ros::NodeHandle &nh) {
     nh.getParam("q_yaw",q_yaw);
     nh.getParam("r_v",r_v);
     nh.getParam("r_steer",r_steer);
+    nh.getParam("q_s",q_s);
+
     Q.setZero(); R.setZero();
     Q.diagonal() << q_x, q_y, q_yaw;
     R.diagonal() << r_v, r_steer;
 
     nh.getParam("MAP_MARGIN",MAP_MARGIN);
-
 }
 
 void HMPC::init_occupancy_grid(){
@@ -59,13 +66,12 @@ void HMPC::init_occupancy_grid(){
         ROS_INFO("Map received");
     }
     ROS_INFO("Initializing occupancy grid for map ...");
-    occupancy_grid::inflate_obstacles(map_, MAP_MARGIN);
+    occupancy_grid::inflate_map(map_, MAP_MARGIN);
 }
 
 void HMPC::visualize_centerline(){
     // plot waypoints
     visualization_msgs::Marker dots;
-    dots.header.stamp = ros::Time::now();
     dots.header.frame_id = "map";
     dots.id = rviz_id::CENTERLINE_POINTS;
     dots.ns = "centerline_points";
@@ -110,8 +116,8 @@ void HMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
     /* process pose info */
     visualize_centerline();
 
-    double speed_m = odom_msg->twist.twist.linear.x;
-//    double speed_m = 2.5;
+    speed_m_ = odom_msg->twist.twist.linear.x;
+    //speed_m_ = 3.2;
 
     tf::Quaternion q_tf;
     tf::quaternionMsgToTF(odom_msg->pose.pose.orientation, q_tf);
@@ -119,39 +125,116 @@ void HMPC::odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg){
     double roll, pitch;
     rot.getRPY(roll, pitch, yaw_);
     car_pos_ = tf::Vector3(odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, 0.0);
+
     tf_.setOrigin(car_pos_);
     tf_.setRotation(q_tf);
 
     /*select reference trajectory*/
-    select_trajectory(speed_m);
+    select_trajectory();
     /*low level MPC to track the reference*/
     execute_MPC();
 }
 
-void HMPC::select_trajectory(double speed_m){
-    double low = max(0.0, speed_m-DECELERATION_MAX*Ts);
-    double high = min(SPEED_MAX, speed_m+ACCELERATION_MAX*Ts);
+void HMPC::map_callback(const nav_msgs::OccupancyGrid::Ptr &map_msg){
+    visualization_msgs::Marker dots;
+    dots.header.frame_id = "map";
+    dots.id = rviz_id::DEBUG;
+    dots.ns = "debug_points";
+    dots.type = visualization_msgs::Marker::POINTS;
+    dots.scale.x = dots.scale.y = 0.1;
+    dots.scale.z = 0.1;
+    dots.action = visualization_msgs::Marker::ADD;
+    dots.pose.orientation.w = 1.0;
+    dots.color.b = 1.0;
+    dots.color.g = 0.5;
+    dots.color.a = 1.0;
+
+    vector<geometry_msgs::Point> path_processed;
+
+    if(rrt_path_.empty()) return;
+    for (int i=0; i< rrt_path_.size()-1; i++){
+        path_processed.push_back(rrt_path_[i]);
+        double dist = sqrt(pow(rrt_path_[i+1].x-rrt_path_[i].x, 2)
+                           +pow(rrt_path_[i+1].y-rrt_path_[i].y, 2));
+        if (dist < RRT_INTERVAL) continue;
+        int num = static_cast<int>(ceil(dist/RRT_INTERVAL));
+        for(int j=1; j< num; j++){
+            geometry_msgs::Point p;
+            p.x = rrt_path_[i].x + j*((rrt_path_[i+1].x - rrt_path_[i].x)/num);
+            p.y = rrt_path_[i].y + j*((rrt_path_[i+1].y - rrt_path_[i].y)/num);
+            path_processed.push_back(p);
+        }
+    }
+
+    for (int i=0; i<path_processed.size(); i++){
+        double theta = track_.findTheta(path_processed[i].x, path_processed[i].y, 0, true);
+        Vector2d p_path(path_processed[i].x,path_processed[i].y);
+        Vector2d p_proj(track_.x_eval(theta), track_.y_eval(theta));
+        Vector2d p1, p2;
+        int t=0;
+        // search one direction until hit obstacle
+        while(true){
+            double x = (p_path + t*map_msg->info.resolution*(p_path-p_proj).normalized())(0);
+            double y = (p_path + t*map_msg->info.resolution*(p_path-p_proj).normalized())(1);
+            if(occupancy_grid::is_xy_occupied(*map_msg, x, y)){
+                p1(0) = x; p1(1) = y;
+                geometry_msgs::Point point;
+                point.x = x; point.y = y;
+                dots.points.push_back(point);
+                break;
+            }
+            t++;
+        }
+        t=0;
+        //search the other direction until hit obstacle
+        while(true){
+            double x = (p_path - t*map_msg->info.resolution*(p_path-p_proj).normalized())(0);
+            double y = (p_path - t*map_msg->info.resolution*(p_path-p_proj).normalized())(1);
+            if(occupancy_grid::is_xy_occupied(*map_msg, x, y)){
+                p2(0) = x; p2(1) = y;
+                geometry_msgs::Point point;
+                point.x = x; point.y = y;
+                dots.points.push_back(point);
+                break;
+            }
+            t++;
+        }
+        double dx_dtheta = track_.x_eval_d(theta);
+        double dy_dtheta = track_.y_eval_d(theta);
+        double right_width = Vector2d(dy_dtheta, -dx_dtheta).dot(p1-p_proj)>0 ? (p1-p_proj).norm() : -(p1-p_proj).norm();
+        double left_width = Vector2d(-dy_dtheta, dx_dtheta).dot(p2-p_proj)>0 ? (p2-p_proj).norm() : -(p2-p_proj).norm();
+//        right_width = -0.15;
+//        left_width =  0.4;
+        cout<<"p1: "<< p1<<endl;
+        cout<<"p2: "<< p2<<endl;
+
+        track_.setHalfWidth(theta, left_width, right_width);
+    }
+    debugger_pub_.publish(dots);
+}
+
+
+void HMPC:: rrt_path_callback(const visualization_msgs::Marker::ConstPtr &path_msg){
+    rrt_path_ = path_msg->points;
+}
+
+void HMPC::select_trajectory(){
+    double low = max(0.3, speed_m_-DECELERATION_MAX*Ts);
+    double high = min(SPEED_MAX, speed_m_ + 2.0*ACCELERATION_MAX*Ts);
     double dv = SPEED_MAX/speed_num;
     double ds = 2*STEER_MAX/steer_num;
-    int low_ind = 0;// static_cast<int>(low/dv);
+    int low_ind = static_cast<int>(low/dv);
     int high_ind = static_cast<int>(high/dv);
     double max_theta = 0.0;
     car_theta_ = track_.findTheta(car_pos_.x(), car_pos_.y(), 0, true);
     double pos_in_map_x, pos_in_map_y;
     vector<Vector3d> traj;
 
-    //visualize_trajectories(low_ind, high_ind);
+   // visualize_trajectories(low_ind, high_ind);
 
     using namespace occupancy_grid;
 
     for (int i=0; i< steer_num+1; i++) {
-//        double steer = -STEER_MAX + i*ds;
-//        if (abs(steer) > 0.3){high_ind = min(high_ind, static_cast<int>(1.0/dv));}
-//        else if (abs(steer) > 0.2){high_ind = min(high_ind, static_cast<int>(1.5/dv));}
-//        else if (abs(steer) > 0.1){high_ind = min(high_ind, static_cast<int>(2.0/dv));}
-//        else{
-//            high_ind = static_cast<int>(high/dv);
-//        }
         for (int j = low_ind; j <= high_ind; j++) {
             // first check if the whole trajectory lies inside track
             traj = trajectory_table_[i][j];
@@ -213,10 +296,6 @@ void HMPC::compute_trajectory_table(){
             double speed = j*dv;
             state.setZero();   // zero in car's body frame
             new_state.setZero();
-//            if (abs(steer) > 0.3){speed = min(speed, 1.0);}
-//            else if (abs(steer) > 0.2){speed = min(speed, 1.0);}
-//            else if (abs(steer) > 0.1){speed = min(speed, 1.0);}
-            //else if (abs(steer) > 0.05){speed = min(speed, 3.5);}
             input(0) = speed; input(1) = steer;
             trajectory.push_back(state);   // add initial state
             for(int k=0; k<N+1; k++){
@@ -232,17 +311,14 @@ void HMPC::compute_trajectory_table(){
 
 void HMPC::execute_MPC(){
 
-    SparseMatrix<double> HessianMatrix((N+1)*(nx+nu),(N+1)*(nx+nu));
-    SparseMatrix<double> constraintMatrix((N+1)*nx+(N+1)+(N+1)*nu, (N+1)*(nx+nu));
+    SparseMatrix<double> HessianMatrix((N+1)*(nx+nu) + (N+1), (N+1)*(nx+nu) + (N+1));
+    SparseMatrix<double> constraintMatrix((N+1)*nx+ 2*(N+1) +(N+1)*nu + (N+1) + N, (N+1)*(nx+nu) + (N+1));
 
-    VectorXd gradient((N+1)*(nx+nu));
+    VectorXd gradient((N+1)*(nx+nu) + (N+1));
     gradient.setZero();
 
-    VectorXd lower((N+1)*nx+(N+1)+(N+1)*nu);
-    VectorXd upper((N+1)*nx+(N+1)+(N+1)*nu);
-
-    lower.head(nx) = -trajectory_ref_[0];
-    upper.head(nx) = -trajectory_ref_[0];
+    VectorXd lower((N+1)*nx+ 2*(N+1)+(N+1)*nu + (N+1) + N);
+    VectorXd upper((N+1)*nx+ 2*(N+1)+(N+1)*nu + (N+1) + N);
 
     border_lines.clear();
 
@@ -271,9 +347,11 @@ void HMPC::execute_MPC(){
             for(int row=0; row< nu; row++){
                 HessianMatrix.insert((N+1)*nx+i*nu+row, (N+1)*nx+i*nu+row) = R(row,row);
             }
-
+            HessianMatrix.insert((N+1)*(nx+nu)+i, (N+1)*(nx+nu)+i) = q_s;
             /* form gradient vector*/
             gradient.segment<nx>(i*nx) << -Q*x_k_ref;
+            gradient.segment<nu>((N+1)*nx+ i*nu) << -R*u_k_ref;
+
         }
         /* form constraint matrix */
         if (i<N){
@@ -293,28 +371,32 @@ void HMPC::execute_MPC(){
             }
             lower.segment<nx>((i+1)*nx) = -x_kp1_ref + Ad*x_k_ref + Bd*u_k_ref;
             upper.segment<nx>((i+1)*nx) = -x_kp1_ref + Ad*x_k_ref + Bd*u_k_ref;
-
         }
-
         /* track boundary constraints */
         double dx_dtheta = track_.x_eval_d(theta_ref);
         double dy_dtheta = track_.y_eval_d(theta_ref);
 
-        constraintMatrix.insert((N+1)*nx+i, i*nx) = -dy_dtheta;
-        constraintMatrix.insert((N+1)*nx+i, i*nx+1) = dx_dtheta;
+        constraintMatrix.insert((N+1)*nx+ 2*i, i*nx) = -dy_dtheta;      // a*x
+        constraintMatrix.insert((N+1)*nx+ 2*i, i*nx+1) = dx_dtheta;     // b*y
+        constraintMatrix.insert((N+1)*nx+ 2*i, (N+1)*(nx+nu) +i) = 1.0;   // min(C1,C2) <= a*x + b*y + s_k <= inf
+
+        constraintMatrix.insert((N+1)*nx+ 2*i+1, i*nx) = -dy_dtheta;      // a*x
+        constraintMatrix.insert((N+1)*nx+ 2*i+1, i*nx+1) = dx_dtheta;     // b*y
+        constraintMatrix.insert((N+1)*nx+ 2*i+1, (N+1)*(nx+nu) +i) = -1.0;   // -inf <= a*x + b*y - s_k <= max(C1,C2)
+
         //get upper line and lower line
         Vector2d left_tangent_p, right_tangent_p, center_p;
         Vector2d right_line_p1, right_line_p2, left_line_p1, left_line_p2;
         geometry_msgs::Point r_p1, r_p2, l_p1, l_p2;
 
         center_p << track_.x_eval(theta_ref), track_.y_eval(theta_ref);
-        right_tangent_p = center_p + track_.getHalfWidth(theta_ref) * Vector2d(dy_dtheta, -dx_dtheta).normalized();
-        left_tangent_p  = center_p + track_.getHalfWidth(theta_ref) * Vector2d(-dy_dtheta, dx_dtheta).normalized();
+        right_tangent_p = center_p + track_.getRightHalfWidth(theta_ref) * Vector2d(dy_dtheta, -dx_dtheta).normalized();
+        left_tangent_p  = center_p + track_.getLeftHalfWidth(theta_ref) * Vector2d(-dy_dtheta, dx_dtheta).normalized();
 
-        right_line_p1 = right_tangent_p + 0.8*Vector2d(dx_dtheta, dy_dtheta).normalized();
-        right_line_p2 = right_tangent_p - 0.8*Vector2d(dx_dtheta, dy_dtheta).normalized();
-        left_line_p1 = left_tangent_p + 0.8*Vector2d(dx_dtheta, dy_dtheta).normalized();
-        left_line_p2 = left_tangent_p - 0.8*Vector2d(dx_dtheta, dy_dtheta).normalized();
+        right_line_p1 = right_tangent_p + 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
+        right_line_p2 = right_tangent_p - 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
+        left_line_p1 = left_tangent_p + 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
+        left_line_p2 = left_tangent_p - 0.15*Vector2d(dx_dtheta, dy_dtheta).normalized();
 
         r_p1.x = right_line_p1(0);  r_p1.y = right_line_p1(1);
         r_p2.x = right_line_p2(0);  r_p2.y = right_line_p2(1);
@@ -327,44 +409,55 @@ void HMPC::execute_MPC(){
         double C1 =  - dy_dtheta*right_tangent_p(0) + dx_dtheta*right_tangent_p(1);
         double C2 = - dy_dtheta*left_tangent_p(0) + dx_dtheta*left_tangent_p(1);
 
-        lower((N+1)*nx+i) = -OsqpEigen::INFTY;//min(C1, C2);
-        upper((N+1)*nx+i) = OsqpEigen::INFTY;//max(C1, C2);
+        //lower((N+1)*nx+i) = -OsqpEigen::INFTY;//min(C1, C2);
+        //upper((N+1)*nx+i) = OsqpEigen::INFTY;//max(C1, C2);
+        lower((N+1)*nx+ 2*i) = min(C1, C2);
+        upper((N+1)*nx+ 2*i) = OsqpEigen::INFTY;
 
+        lower((N+1)*nx+ 2*i+1) = -OsqpEigen::INFTY;
+        upper((N+1)*nx+ 2*i+1) = max(C1, C2);
         // -I for each x_k+1
         for (int row=0; row<nx; row++) {
             constraintMatrix.insert(i*nx+row, i*nx+row) = -1.0;
         }
         // u_min < u < u_max
         for (int row=0; row<nu; row++){
-            constraintMatrix.insert((N+1)*nx+(N+1)+i*nu+row, (N+1)*nx+i*nu+row) = 1.0;
+            constraintMatrix.insert((N+1)*nx+ 2*(N+1) +i*nu+row, (N+1)*nx+i*nu+row) = 1.0;
+        }
+        // s_k >= 0
+        constraintMatrix.insert((N+1)*nx+ 2*(N+1) +(N+1)*nu+ i, (N+1)*(nx+nu)+ i) = 1.0;
+        // acceleration constraint
+        if(i<N){
+            constraintMatrix.insert((N+1)*nx+ 2*(N+1) +(N+1)*nu + (N+1) +i, (N+1)*nx+i*nu) = -1;
+            constraintMatrix.insert((N+1)*nx+ 2*(N+1) +(N+1)*nu + (N+1) +i, (N+1)*nx+(i+1)*nu) = 1;
+            lower((N+1)*nx+ 2*(N+1) +(N+1)*nu + (N+1) +i) = -OsqpEigen::INFTY;
+            upper((N+1)*nx+ 2*(N+1) +(N+1)*nu + (N+1) +i) = ACCELERATION_MAX *Ts;
         }
         // input bounds: speed and steer
-        lower((N+1)*nx+(N+1)+i*nu) = 0.0;
-        upper((N+1)*nx+(N+1)+i*nu) = SPEED_MAX;
-        lower((N+1)*nx+(N+1)+i*nu+1) = -STEER_MAX;
-        upper((N+1)*nx+(N+1)+i*nu+1) = STEER_MAX;
+        lower((N+1)*nx+ 2*(N+1) +i*nu) = 0.0;
+        upper((N+1)*nx+ 2*(N+1)+i*nu) = SPEED_MAX;
+        lower((N+1)*nx+ 2*(N+1)+i*nu+1) = -STEER_MAX;
+        upper((N+1)*nx+ 2*(N+1)+i*nu+1) = STEER_MAX;
+        // s_k >= 0
+        lower((N+1)*nx+ 2*(N+1) +(N+1)*nu+ i) = 0.0;
+        upper((N+1)*nx+ 2*(N+1) +(N+1)*nu+ i) = OsqpEigen::INFTY;
     }
+    // enforcing inital conditions
+
+    lower.head(nx) = -trajectory_ref_[0];  //x0
+    upper.head(nx) = -trajectory_ref_[0];
+    lower((N+1)*nx+ 2*(N+1)) = max(0.0, last_speed_cmd_- DECELERATION_MAX *Ts);   //u0
+    upper((N+1)*nx+ 2*(N+1)) = min(SPEED_MAX, last_speed_cmd_ + ACCELERATION_MAX/2 *Ts);
 
     SparseMatrix<double> H_t = HessianMatrix.transpose();
-    SparseMatrix<double> sparse_I((N+1)*(nx+nu),(N+1)*(nx+nu));
+    SparseMatrix<double> sparse_I((N+1)*(nx+nu) + (N+1),(N+1)*(nx+nu) + (N+1));
     sparse_I.setIdentity();
     HessianMatrix = 0.5*(HessianMatrix + H_t) + 0.000001*sparse_I;
 
-//    cout<< "Hessian: "<< endl;
-//     cout<<HessianMatrix << endl;
-//    cout<< "constraint: "<<endl;
-//    cout<< constraintMatrix << endl;
-//    cout<<"lower: "<<endl;
-//     cout<<lower<<endl;
-//    cout<<"upper: "<<endl;
-//    cout<<upper<<endl;
-//     cout<<"gradient: "<<endl;
-//     cout<<gradient<<endl;
-
     OsqpEigen::Solver solver;
     solver.settings()->setWarmStart(true);
-    solver.data()->setNumberOfVariables((N+1)*(nx+nu));
-    solver.data()->setNumberOfConstraints((N+1)*nx+(N+1)+(N+1)*nu);
+    solver.data()->setNumberOfVariables((N+1)*(nx+nu) + (N+1));
+    solver.data()->setNumberOfConstraints((N+1)*nx+ 2*(N+1) +(N+1)*nu + (N+1) + N);
 
     if (!solver.data()->setHessianMatrix(HessianMatrix)) throw "fail set Hessian";
     if (!solver.data()->setGradient(gradient)){throw "fail to set gradient";}
@@ -378,6 +471,9 @@ void HMPC::execute_MPC(){
         return;
     }
     VectorXd QPSolution = solver.getSolution();
+
+    cout<<"Solution: "<<endl;
+    cout<<QPSolution<<endl;
 
     applyControl(QPSolution);
     visualize_mpc_solution(QPSolution);
@@ -510,7 +606,7 @@ void HMPC::visualize_mpc_solution(VectorXd& QPSolution){
     visualization_msgs::MarkerArray mpc_markers;
     mpc_markers.markers.push_back(traj_ref);
     mpc_markers.markers.push_back(pred_dots);
-   // mpc_markers.markers.push_back(borderlines);
+    mpc_markers.markers.push_back(borderlines);
    mpc_markers.markers.push_back(max_theta);
 
     hmpc_viz_pub_.publish(mpc_markers);
@@ -522,6 +618,7 @@ void HMPC::applyControl(VectorXd& QPSolution) {
     float steer = QPSolution((N+1)*nx+1);
     cout<<"speed_cmd: "<<speed<<endl;
     cout<<"steer_cmd: "<<steer<<endl;
+    cout<<"input_ref: "<<input_ref_<<endl;
 
     steer = min(steer, 0.41f);
     steer = max(steer, -0.41f);
@@ -531,6 +628,7 @@ void HMPC::applyControl(VectorXd& QPSolution) {
     ack_msg.drive.steering_angle = steer;
     ack_msg.drive.steering_angle_velocity = 1.0;
     drive_pub_.publish(ack_msg);
+    last_speed_cmd_ = speed;
 }
 
 int main(int argc, char **argv){

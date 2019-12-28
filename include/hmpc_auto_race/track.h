@@ -29,13 +29,15 @@
 #include <Eigen/Dense>
 
 const int SEARCH_RANGE = 10;
-const double HALF_WIDTH_MAX = 1.1;
+const double HALF_WIDTH_MAX = 0.8;
 using namespace std;
 typedef struct Point_ref{
     double x;
     double y;
     double theta;  // theta represents progress along centerline
-    double half_width= 1.1;
+    double left_half_width;
+    double right_half_width;
+
 }Point_ref;
 
 
@@ -77,6 +79,7 @@ public:
                 theta += dist;
                 Point_ref p;
                 p.x = waypoints.at(next).x; p.y = waypoints.at(next).y; p.theta = theta;
+                p.left_half_width = p.right_half_width = HALF_WIDTH_MAX;
                 centerline.push_back(p);
                 curr = next;
             }
@@ -176,7 +179,6 @@ public:
                 }
             }
 
-
 //            if (theta>length){ theta -= length;}
 //            if (theta<0){ theta += length;}
 
@@ -227,12 +229,26 @@ public:
         return atan2(dy_dtheta, dx_dtheta);
     }
 
-    double getHalfWidth(double theta){
+    double getLeftHalfWidth(double theta){
        // wrapTheta(theta);
-        int ind = int(floor(theta/space));
-        ind = max(0, ind);
-        ind= min(int(centerline.size()-1), ind);
-        return centerline.at(ind).half_width;
+        int ind = static_cast<int>(floor(theta/space));
+        ind = max(0, min(int(centerline.size()-1), ind));
+        return centerline.at(ind).left_half_width;
+    }
+
+    double getRightHalfWidth(double theta){
+        // wrapTheta(theta);
+        int ind = static_cast<int>(floor(theta/space));
+        ind = max(0, min(int(centerline.size()-1), ind));
+        return centerline.at(ind).right_half_width;
+    }
+
+    void setHalfWidth(double theta, double left_val, double right_val){
+        // wrapTheta(theta);
+        int ind = static_cast<int>(floor(theta/space));
+        ind = max(0, min(int(centerline.size()-1), ind));
+        centerline.at(ind).left_half_width = left_val;
+        centerline.at(ind).right_half_width = right_val;
     }
 
 };

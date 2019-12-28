@@ -68,7 +68,7 @@ namespace occupancy_grid{
         }
     }
 
-    void inflate_obstacles(nav_msgs::OccupancyGrid& grid, float margin){
+    void inflate_map(nav_msgs::OccupancyGrid& grid, float margin){
         vector<int> occupied_ind;
         occupied_ind.clear();
         for (int i=0; i<grid.data.size(); i++){

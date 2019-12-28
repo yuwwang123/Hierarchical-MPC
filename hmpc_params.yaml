@@ -1,20 +1,21 @@
 pose_topic : "odom"
 drive_topic: "nav"
-q_x : 4
-q_y : 4
-q_yaw : 6
-r_v : 0.1
-r_steer: 0.00
+q_x : 5.0
+q_y : 5.0
+q_yaw : 1.0
+r_v : 2.0
+r_steer: 2.0
+q_s : 400.0
 
-N: 30
+N: 20
 Ts: 0.04
 
-SPEED_MAX: 5.00
+SPEED_MAX: 12.00
 STEER_MAX: 0.41
 ACCELERATION_MAX: 10.0
-DECELERATION_MAX: 60.0
-speed_num: 50
-steer_num: 30
-MAP_MARGIN: 0.25
+DECELERATION_MAX: 30.0
+speed_num: 40
+steer_num: 50
+MAP_MARGIN: 0.19
 
 SPEED_THRESHOLD: 2.0

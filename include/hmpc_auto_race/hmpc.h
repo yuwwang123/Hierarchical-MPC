@@ -52,7 +52,8 @@ enum rviz_id{
     BORDERLINES,
     TRAJECTORY_REF,
     TRAJECTORIES,
-    MAX_THETA
+    MAX_THETA,
+    DEBUG
 };
 
 
@@ -76,11 +77,13 @@ private:
     ros::NodeHandle nh_;
     ros::Publisher track_viz_pub_;
     ros::Publisher trajectories_viz_pub_;
-
     ros::Publisher hmpc_viz_pub_;
     ros::Publisher drive_pub_;
-    ros::Subscriber odom_sub_;
+    ros::Publisher debugger_pub_;
 
+    ros::Subscriber odom_sub_;
+    ros::Subscriber rrt_sub_;
+    ros::Subscriber map_sub_;
     /*Paramaters*/
     string pose_topic;
     string drive_topic;
@@ -100,6 +103,7 @@ private:
     double q_yaw;
     double r_v;
     double r_steer;
+    double q_s;
     Matrix<double, nx, nx> Q;
     Matrix<double, nu, nu> R;
 
@@ -109,10 +113,13 @@ private:
     tf::Vector3 car_pos_;
     double yaw_;
     double car_theta_;
-
+    double speed_m_;
     vector<vector<vector<Vector3d>>> trajectory_table_;
     vector<Vector3d> trajectory_ref_;
     Vector2d input_ref_;
+    double last_speed_cmd_;
+
+    vector<geometry_msgs::Point> rrt_path_;
     nav_msgs::OccupancyGrid map_;
     nav_msgs::OccupancyGrid map_updated_;
 
@@ -123,11 +130,16 @@ private:
     void visualize_centerline();
     void compute_trajectory_table();
     void odom_callback(const nav_msgs::Odometry::ConstPtr &odom_msg);
-    void select_trajectory(double speed_m);
+    void select_trajectory();
     void simulate_dynamics(Vector3d& state, Vector2d& input, double dt, Vector3d& new_state);
     void execute_MPC();
     void get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op);
     void applyControl(VectorXd& QPSolution);
     void visualize_trajectories(int low, int high);
     void visualize_mpc_solution(VectorXd& QPSolution);
+
+    void rrt_path_callback(const visualization_msgs::Marker::ConstPtr &path_msg);
+    void map_callback(const nav_msgs::OccupancyGrid::Ptr &map_msg);
+
+
 };

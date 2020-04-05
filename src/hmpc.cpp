@@ -323,7 +323,7 @@ void HMPC::execute_MPC(){
     border_lines.clear();
 
     Matrix<double,nx,1> x_k_ref;
-    Matrix<double,nx,1> x_kp1_ref;
+    Matrix<double,nx,1> hd;
 
     Matrix<double,nu,1> u_k_ref;
     u_k_ref = input_ref_;
@@ -335,7 +335,7 @@ void HMPC::execute_MPC(){
         double theta_ref = track_.findTheta(x_k_ref(0), x_k_ref(1), 0, true);
         if (theta_ref-car_theta_ < -track_.length/2){ theta_ref += track_.length; }
         if (theta_ref-car_theta_ > track_.length/2){ theta_ref -= track_.length; }
-        get_linearized_dynamics(Ad, Bd, x_k_ref, u_k_ref);
+        get_linearized_dynamics(Ad, Bd, hd, x_k_ref, u_k_ref);
         /* form Hessian entries*/
         // cost does not depend on x0, only 1 to N
         if (i>0) {
@@ -355,7 +355,6 @@ void HMPC::execute_MPC(){
         }
         /* form constraint matrix */
         if (i<N){
-            x_kp1_ref = trajectory_ref_[i+1];
             // Ad
             for (int row=0; row<nx; row++){
                 for(int col=0; col<nx; col++){
@@ -369,8 +368,8 @@ void HMPC::execute_MPC(){
                     constraintMatrix.insert((i+1)*nx+row, (N+1)*nx+ i*nu+col) = Bd(row,col);
                 }
             }
-            lower.segment<nx>((i+1)*nx) = -x_kp1_ref + Ad*x_k_ref + Bd*u_k_ref;
-            upper.segment<nx>((i+1)*nx) = -x_kp1_ref + Ad*x_k_ref + Bd*u_k_ref;
+            lower.segment<nx>((i+1)*nx) = -hd;
+            upper.segment<nx>((i+1)*nx) = -hd;
         }
         /* track boundary constraints */
         double dx_dtheta = track_.x_eval_d(theta_ref);
@@ -482,13 +481,20 @@ void HMPC::execute_MPC(){
 
 }
 
-void HMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op){
+void HMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& hd, Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op){
     double yaw = x_op(2);
     double v = u_op(0);
     double steer = u_op(1);
 
-    Matrix<double,nx,nx> A;
+    Vector3d dynamics, h;
+    dynamics(0) = u_op(0)*cos(x_op(2));
+    dynamics(1) = u_op(0)*sin(x_op(2));
+    dynamics(2) = tan(u_op(1))*u_op(0)/CAR_LENGTH;
+
+
+    Matrix<double,nx,nx> A, M12;
     Matrix<double,nx,nu> B;
+
     A <<   0.0, 0.0, -v*sin(yaw),
             0.0, 0.0,  v*cos(yaw),
             0.0, 0.0,      0.0;
@@ -497,10 +503,18 @@ void HMPC::get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, n
             sin(yaw), 0.0,
             tan(steer)/CAR_LENGTH, v/(cos(steer)*cos(steer)*CAR_LENGTH);
 
-    //Discretize with Euler approximation
-    Ad = Matrix3d::Identity() + A*Ts;
-    //Ad = (A*Ts).exp();
-    Bd = Ts*B;
+    Matrix<double,nx+nx,nx+nx> aux, M;
+    aux.setZero();
+    aux.block<nx,nx>(0,0) << A;
+    aux.block<nx,nx>(0, nx) << Matrix3d::Identity();
+    M = (aux*Ts).exp();
+    M12 = M.block<nx,nx>(0,nx);
+    h = dynamics - (A*x_op + B*u_op);
+
+    //Discretize
+    Ad = (A*Ts).exp();
+    Bd = M12*B;
+    hd = M12*h;
 }
 
 void HMPC::visualize_trajectories(int low, int high){
@@ -607,7 +621,7 @@ void HMPC::visualize_mpc_solution(VectorXd& QPSolution){
     mpc_markers.markers.push_back(traj_ref);
     mpc_markers.markers.push_back(pred_dots);
     mpc_markers.markers.push_back(borderlines);
-   mpc_markers.markers.push_back(max_theta);
+    mpc_markers.markers.push_back(max_theta);
 
     hmpc_viz_pub_.publish(mpc_markers);
 }

@@ -133,7 +133,7 @@ private:
     void select_trajectory();
     void simulate_dynamics(Vector3d& state, Vector2d& input, double dt, Vector3d& new_state);
     void execute_MPC();
-    void get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op);
+    void get_linearized_dynamics(Matrix<double,nx,nx>& Ad, Matrix<double,nx, nu>& Bd, Matrix<double,nx,1>& hd, Matrix<double,nx,1>& x_op, Matrix<double,nu,1>& u_op);
     void applyControl(VectorXd& QPSolution);
     void visualize_trajectories(int low, int high);
     void visualize_mpc_solution(VectorXd& QPSolution);

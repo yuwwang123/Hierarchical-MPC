@@ -5,6 +5,6 @@ High-level Trajectory Planner: At every time instance, select from a trajectory 
 
 Low-level MPC tracking controller: The MPC generates a dynamically feasible trajectory that tracks the reference trajectory given by the high level planner while satisfying all constraints.
 
-For obstacle avoidance, RRT* is incorparated to provide convex feasible space constraints in real time to MPC.
+For obstacle avoidance, RRT* is incorparated to provide convex feasible space constraints in real time to MPC based on LiDAR feedbacks.
 
 ![](media/mpc.gif)

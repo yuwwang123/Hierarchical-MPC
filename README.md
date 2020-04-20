@@ -10,7 +10,9 @@ For obstacle avoidance, RRT* is incorparated to provide convex feasible space co
 ![](media/mpc.gif)
 
 Testing on the car: 
+
 ![](media/car_testing.gif)
+
 ![](media/car_testing2.gif)
 
 

@@ -13,5 +13,7 @@ Testing on the car:
 
 ![](media/car_testing.gif)
 
+Head-to-head Racing:
+
 
 

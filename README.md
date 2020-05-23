@@ -15,7 +15,7 @@ Testing on the car:
 
 Head-to-head Racing:
 
-![](head_to_head.gif)
+![](head-to-head.gif)
 
 
 
